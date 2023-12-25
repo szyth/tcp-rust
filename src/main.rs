@@ -1,7 +1,17 @@
+use std::{collections::HashMap, net::Ipv4Addr};
+
 use tun_tap::Iface;
+mod tcp;
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+struct Quad {
+    src: (Ipv4Addr, u16),
+    dst: (Ipv4Addr, u16),
+}
 
 fn main() -> Result<(), std::io::Error> {
-    let nic = Iface::new("tun0", tun_tap::Mode::Tun)?;
+    let mut connections: HashMap<Quad, tcp::State> = Default::default();
+    let mut nic = Iface::new("tun0", tun_tap::Mode::Tun)?;
     let mut buf = [0u8; 1504];
     loop {
         let nbytes = nic.recv(&mut buf[..])?;
@@ -16,14 +26,18 @@ fn main() -> Result<(), std::io::Error> {
             continue;
         }
 
+        // TUNTAP interface has 2bytes for flags, and 2bytes for proto
+        // 3.2 Frame format: https://www.kernel.org/doc/Documentation/networking/tuntap.txt
+        let eth_header_size = 4;
+
         // parsing IPv4 Packet Header
-        match etherparse::Ipv4HeaderSlice::from_slice(&buf[4..nbytes]) {
-            // range: [4..nbytes]
-            // as TUNTAP interface has 2bytes for flags, and 2bytes for proto
-            // 3.2 Frame format: https://www.kernel.org/doc/Documentation/networking/tuntap.txt
+
+        match etherparse::Ipv4HeaderSlice::from_slice(&buf[eth_header_size..nbytes]) {
+            // end range is `nbytes` because `buf` has 1504 length
+            // but only the bytes received from `nic.recv()` is what we need, which is in `nbytes`
             Ok(ip_header) => {
-                let src = ip_header.source_addr();
-                let dst = ip_header.destination_addr();
+                let ip_src = ip_header.source_addr();
+                let ip_dst = ip_header.destination_addr();
                 let _len = ip_header.payload_len();
                 let proto = ip_header.protocol();
 
@@ -32,20 +46,31 @@ fn main() -> Result<(), std::io::Error> {
                     continue;
                 }
 
-                // parsing TCP Header
-                match etherparse::TcpHeaderSlice::from_slice(&buf[4 + ip_header.slice().len()..]) {
-                    // range: [4+ip_header.slice().len()..]
-                    // 4: mentioned earlier
-                    // `ip_header.slice().len()`: IPv4 Header Bytes
-                    // remaining are the TCP header Bytes
+                // IPv4 Header Bytes size
+                let ip_header_size = ip_header.slice().len();
+
+                // PARSING TCP HEADER
+
+                // start index of TCP header Bytes starts after ethheader and ipheader
+                // end range is `nbytes` because `buf` has 1504 length
+                // but only the bytes received from `nic.recv()` is what we need, which is upto `nbytes` length
+                match etherparse::TcpHeaderSlice::from_slice(
+                    &buf[eth_header_size + ip_header_size..nbytes],
+                ) {
                     Ok(tcp_header) => {
-                        eprintln!(
-                            "{} -> {} {}b of tcp to port {}",
-                            src,
-                            dst,
-                            tcp_header.slice().len(),
-                            tcp_header.destination_port()
-                        );
+                        // TCP Header Bytes size
+                        let tcp_header_size = tcp_header.slice().len();
+
+                        // start index of TCP Data/Payload after eth_header, ip_header and tcp_header
+                        let data_index = eth_header_size + ip_header_size + tcp_header_size;
+
+                        connections
+                            .entry(Quad {
+                                src: (ip_src, tcp_header.source_port()),
+                                dst: (ip_dst, tcp_header.destination_port()),
+                            })
+                            .or_default()
+                            .on_packet(&mut nic, ip_header, tcp_header, &buf[data_index..nbytes]);
                     }
                     Err(e) => {
                         eprintln!("Ignoring packet: {}", e)
