@@ -1,0 +1,3 @@
+- Run the Server Binary and setup tun0 interface: `./run.sh`
+- Run the Client: `nc 192.168.0.2 80`
+- View the Client-Server Packet Exchange: `sudo tshark -i tun0`

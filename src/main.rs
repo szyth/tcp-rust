@@ -1,4 +1,7 @@
-use std::{collections::HashMap, net::Ipv4Addr};
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    net::Ipv4Addr,
+};
 
 use tun_tap::Iface;
 mod tcp;
@@ -10,7 +13,7 @@ struct Quad {
 }
 
 fn main() -> Result<(), std::io::Error> {
-    let mut connections: HashMap<Quad, tcp::State> = Default::default();
+    let mut connections: HashMap<Quad, tcp::Connection> = Default::default();
     let mut nic = Iface::new("tun0", tun_tap::Mode::Tun)?;
     let mut buf = [0u8; 1504];
     loop {
@@ -64,13 +67,30 @@ fn main() -> Result<(), std::io::Error> {
                         // start index of TCP Data/Payload after eth_header, ip_header and tcp_header
                         let data_index = eth_header_size + ip_header_size + tcp_header_size;
 
-                        connections
-                            .entry(Quad {
-                                src: (ip_src, tcp_header.source_port()),
-                                dst: (ip_dst, tcp_header.destination_port()),
-                            })
-                            .or_default()
-                            .on_packet(&mut nic, ip_header, tcp_header, &buf[data_index..nbytes]);
+                        match connections.entry(Quad {
+                            src: (ip_src, tcp_header.source_port()),
+                            dst: (ip_dst, tcp_header.destination_port()),
+                        }) {
+                            Entry::Occupied(mut conn) => {
+                                let _ = conn.get_mut().on_packet(
+                                    &mut nic,
+                                    ip_header,
+                                    tcp_header,
+                                    &buf[data_index..nbytes],
+                                );
+                            }
+                            // accept a connection if a new Quad is received
+                            Entry::Vacant(e) => {
+                                if let Some(conn) = tcp::Connection::accept(
+                                    &mut nic,
+                                    ip_header,
+                                    tcp_header,
+                                    &buf[data_index..nbytes],
+                                )? {
+                                    e.insert(conn);
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         eprintln!("Ignoring packet: {}", e)
